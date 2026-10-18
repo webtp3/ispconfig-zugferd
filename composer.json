@@ -1,4 +1,17 @@
 {
+
+        "name": "web-tp3/ispconfig-zugferd",
+        "type": "library",
+        "description":"E-Rechnnung für ISPConfig mit Zugferd",
+        "minimum-stability": "dev",
+        "license":"proprietary",
+        "authors": [
+            {
+                "name": "Thomas Ruta",
+                "email": "email@thomasruta.de"
+            }
+
+        ],
     "require": {
         "horstoeko/zugferd": "^1.0"
     }
