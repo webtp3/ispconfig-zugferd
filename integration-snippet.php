@@ -11,13 +11,24 @@ require_once $zugferdAutoload;
 require_once $zugferdService;
 $invoice = $app->db->queryOneRecord('SELECT * FROM invoice WHERE invoice_id = ?', $invoice_id);
 $items = $app->db->queryAllRecords('SELECT * FROM invoice_item WHERE invoice_id = ? ORDER BY invoice_item_id', $invoice_id);
+$paymentTerms = $app->db->queryOneRecord('SELECT * FROM invoice_payment_term WHERE invoice_payment_term_id = ?', $invoice['payment_terms']);
+foreach ($items as &$item) {
+    if (!empty($item['invoice_item_template_id'])) {
+        $template = $app->db->queryOneRecord('SELECT unit FROM invoice_item_template WHERE invoice_item_template_id = ?', $item['invoice_item_template_id']);
+        if (!$template || empty($template['unit'])) throw new RuntimeException('Missing item unit.');
+        $item['unit'] = $template['unit'];
+    }
+}
+unset($item);
 $settings = $app->db->queryOneRecord('SELECT * FROM invoice_settings WHERE invoice_settings_id = 1');
 $combinedPdf = ZugferdInvoiceService::mergePdf(
     $invoice,
     $company,
     $items ?: [],
     $pdf_content,
-    (string)($settings['currency'] ?? 'EUR')
+    (string)($settings['currency'] ?? 'EUR'),
+    $paymentTerms ?: [],
+    ['use_invoice_date_as_delivery_date' => true]
 );
 // TODO: insert a dedicated PAdES signing stage here, after ZUGFeRD merge.
 if (file_put_contents($invoice_filename, $combinedPdf, LOCK_EX) === false) {

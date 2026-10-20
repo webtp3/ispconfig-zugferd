@@ -24,7 +24,9 @@ final class ZugferdInvoiceService
         array $issuer,
         array $items,
         string $existingPdf,
-        string $currency = 'EUR'
+        string $currency = 'EUR',
+        array $paymentTerms = [],
+        array $options = []
     ): string {
         if (($invoice['invoice_type'] ?? '') !== 'invoice') {
             throw new RuntimeException('Only finalized normal invoices are supported.');
@@ -49,7 +51,7 @@ final class ZugferdInvoiceService
         if (empty($issuer['vat_id']) && empty($issuer['tax_id'])) {
             throw new RuntimeException('Issuer needs tax number or VAT ID.');
         }
-        $buyerName = trim((string)($invoice['company_name'] ?: ($invoice['contact_name'] ?? '')));
+        $buyerName = trim((string)(($invoice['company_name'] ?? '') ?: ($invoice['contact_name'] ?? '')));
         if ($buyerName === '') {
             throw new RuntimeException('Missing buyer name.');
         }
@@ -73,6 +75,7 @@ final class ZugferdInvoiceService
         }
         $doc->setDocumentBuyer($buyerName);
         $doc->setDocumentBuyerAddress((string)$invoice['street'], '', '', (string)$invoice['zip'], (string)$invoice['city'], $buyerCountry);
+        if (!empty($invoice['vat_id'])) $doc->addDocumentBuyerVATRegistrationNumber((string)$invoice['vat_id']);
         if (!empty($invoice['email'])) {
             $doc->setDocumentBuyerCommunication(ZugferdElectronicAddressScheme::UNECE3155_EM, (string)$invoice['email']);
         }
@@ -81,6 +84,29 @@ final class ZugferdInvoiceService
             // and ISPConfig payment gateway; do not assume direct debit.
             $doc->setDocumentGeneralPaymentInformation(null, (string)$invoice['invoice_number']);
         }
+
+        // BT-9/BT-20: use the actual configured term, not its numeric ID or name alone.
+        $termDescription = trim((string)($paymentTerms['description'] ?? $paymentTerms['name'] ?? ''));
+        $dueDate = null;
+        if (isset($paymentTerms['due_days'])) {
+            $days = filter_var($paymentTerms['due_days'], FILTER_VALIDATE_INT);
+            if ($days === false || $days < 0) throw new RuntimeException('Invalid payment due_days.');
+            $dueDate = self::date((string)$invoice['invoice_date'])->modify('+'.$days.' days');
+        }
+        if ($termDescription === '' && $dueDate === null) {
+            throw new RuntimeException('Payment term description or due_days is required (BR-CO-25).');
+        }
+        $doc->addDocumentPaymentTerm($termDescription !== '' ? $termDescription : null, $dueDate);
+
+        $deliveryDate = !empty($invoice['delivery_date']) ? self::date((string)$invoice['delivery_date']) : null;
+        $defaultServiceDate = !empty($options['use_invoice_date_as_delivery_date'])
+            ? self::date((string)$invoice['invoice_date']) : null;
+        if ($deliveryDate !== null) $doc->setDocumentSupplyChainEvent($deliveryDate);
+        // Invoice address is the delivery default; callers can supply an explicit delivery country.
+        $deliveryCountry = self::country((string)($invoice['delivery_country'] ?? $buyerCountry));
+        if (!$deliveryCountry) throw new RuntimeException('Missing delivery country.');
+        $doc->setDocumentShipTo($buyerName);
+        $doc->setDocumentShipToAddress(null, null, null, null, null, $deliveryCountry);
 
         $taxGroups = [];
         $netTotal = 0.0;
@@ -91,7 +117,7 @@ final class ZugferdInvoiceService
             if ($qty <= 0 || $vat < 0 || $vat > 100) {
                 throw new RuntimeException('Invalid quantity/VAT in invoice item '.($index + 1));
             }
-            if (!in_array(round($vat, 2), [0.0, 7.0, 19.0], true)) {
+            if (!in_array(round($vat, 2), [0.0, 7.0, 12.0, 19.0, 21.0], true)) {
                 throw new RuntimeException('Nonstandard VAT requires explicit legal tax category mapping.');
             }
             $lineNet = round($qty * $unitPrice, 2);
@@ -102,11 +128,32 @@ final class ZugferdInvoiceService
             if ($description === '') {
                 throw new RuntimeException('Missing invoice line description.');
             }
-            $category = $vat == 0.0 ? ZugferdVatCategoryCodes::ZERO_RATE : ZugferdVatCategoryCodes::STAN_RATE;
+            // Zero percent is not sufficient to determine a legal tax category.
+            if ($vat == 0.0) {
+                if ((int)($item['invoice_vat_rate_id'] ?? 0) !== 2) {
+                    throw new RuntimeException('Zero VAT requires an explicit mapping; only rate ID 2 is reverse charge.');
+                }
+                if (empty($issuer['vat_id']) || empty($invoice['vat_id'])) {
+                    throw new RuntimeException('Reverse charge requires seller and buyer VAT IDs.');
+                }
+                $category = 'AE';
+            } else {
+                $category = ZugferdVatCategoryCodes::STAN_RATE;
+            }
             $doc->addNewPosition((string)($index + 1));
             $doc->setDocumentPositionProductDetails(mb_substr($description, 0, 200));
-            $doc->setDocumentPositionNetPrice($unitPrice);
-            $doc->setDocumentPositionQuantity($qty, ZugferdUnitCodes::REC20_PIECE);
+            [$xmlQty, $xmlPrice, $unitCode] = self::unit($item, $qty, $unitPrice);
+            $doc->setDocumentPositionNetPrice($xmlPrice);
+            $doc->setDocumentPositionQuantity($xmlQty, $unitCode);
+            $period = self::period($item, $description);
+            if ($period !== null) {
+                $doc->setDocumentPositionBillingPeriod($period[0], $period[1]);
+            } elseif ($deliveryDate === null) {
+                if ($defaultServiceDate === null || preg_match('/\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2}/', $description)) {
+                    throw new RuntimeException('Missing/unrecognized delivery date or service period for line '.($index + 1).' (BR-FX-EN-04).');
+                }
+                $doc->setDocumentPositionBillingPeriod($defaultServiceDate, $defaultServiceDate);
+            }
             $doc->addDocumentPositionTax($category, ZugferdVatTypeCodes::VALUE_ADDED_TAX, $vat);
             $doc->setDocumentPositionLineSummation($lineNet);
             $key = $category . ':' . number_format($vat, 2, '.', '');
@@ -121,7 +168,7 @@ final class ZugferdInvoiceService
         foreach ($taxGroups as $taxGroup) {
             $base = round($taxGroup['base'], 2);
             $tax = round($base * $taxGroup['rate'] / 100, 2);
-            $doc->addDocumentTax($taxGroup['category'], ZugferdVatTypeCodes::VALUE_ADDED_TAX, $base, $tax, $taxGroup['rate']);
+            $doc->addDocumentTax($taxGroup['category'], ZugferdVatTypeCodes::VALUE_ADDED_TAX, $base, $tax, $taxGroup['rate'], $taxGroup['category'] === 'AE' ? 'Reverse charge' : null, $taxGroup['category'] === 'AE' ? 'VATEX-EU-AE' : null);
             $vatTotal += $tax;
         }
         $vatTotal = round($vatTotal, 2);
@@ -139,6 +186,52 @@ final class ZugferdInvoiceService
         $pdf = ZugferdDocumentPdfBuilder::fromPdfString($doc, $existingPdf);
         $pdf->generateDocument();
         return $pdf->downloadString();
+    }
+
+    private static function date(string $value): DateTimeImmutable
+    {
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        if (!$date || $date->format('Y-m-d') !== $value) throw new RuntimeException('Invalid invoice/service date: '.$value);
+        return $date;
+    }
+
+    private static function unit(array $item, float $quantity, float $price): array
+    {
+        $unit = strtolower(trim((string)($item['unit'] ?? 'Item')));
+        if (in_array($unit, ['item', 'items', 'h87'], true)) return [$quantity, $price, 'H87'];
+        if (in_array($unit, ['hour', 'hours', 'hur'], true)) return [$quantity, $price, 'HUR'];
+        // There is no invented "half hour" code: convert both quantity and price.
+        if (in_array($unit, ['half-hour', 'halfhour', 'halfhours'], true)) {
+            $hours = $quantity / 2;
+            $precision = \horstoeko\zugferd\ZugferdSettings::getQuantityDecimals();
+            if (abs(round($hours, $precision) - $hours) > 0.0000001) {
+                throw new RuntimeException('Half-hour quantity exceeds XML quantity precision.');
+            }
+            return [$hours, $price * 2, 'HUR'];
+        }
+        throw new RuntimeException('Unknown invoice unit: '.$unit);
+    }
+
+    private static function period(array $item, string $description): ?array
+    {
+        $start = $item['service_period_start'] ?? null;
+        $end = $item['service_period_end'] ?? null;
+        // Legacy ISPConfig stores expanded FROMDATE/TODATE at the end of the first line.
+        // Read only that precise form, never dates from arbitrary free-text lines.
+        if (!$start && !$end) {
+            $firstLine = preg_split('/\R/u', $description)[0];
+            if (preg_match('/(?:^|\s)(\d{2}\.\d{2}\.\d{4})\s+(?:[-–]\s*)?(\d{2}\.\d{2}\.\d{4})\s*$/u', $firstLine, $match)) {
+                $start = implode('-', array_reverse(explode('.', $match[1])));
+                $end = implode('-', array_reverse(explode('.', $match[2])));
+            } else {
+                return null;
+            }
+        }
+        if (!$start || !$end) throw new RuntimeException('Incomplete service period.');
+        $from = self::date((string)$start);
+        $to = self::date((string)$end);
+        if ($from > $to) throw new RuntimeException('Service period starts after its end.');
+        return [$from, $to];
     }
 
     private static function country(string $value): string
