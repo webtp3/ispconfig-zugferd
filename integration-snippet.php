@@ -28,7 +28,7 @@ $combinedPdf = ZugferdInvoiceService::mergePdf(
     $pdf_content,
     (string)($settings['currency'] ?? 'EUR'),
     $paymentTerms ?: [],
-    ['use_invoice_date_as_delivery_date' => true]
+    ['use_invoice_date_as_delivery_date' => true, 'expected_totals' => $app->billing_functions->invoice_display_totals($items)]
 );
 // TODO: insert a dedicated PAdES signing stage here, after ZUGFeRD merge.
 if (file_put_contents($invoice_filename, $combinedPdf, LOCK_EX) === false) {

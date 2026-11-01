@@ -173,19 +173,36 @@ final class ZugferdInvoiceService
         }
         $vatTotal = round($vatTotal, 2);
         $gross = round($netTotal + $vatTotal, 2);
-        // Fail closed on rounding mismatch against ISPConfig's own original calculation.
-        $expectedGross = 0.0;
-        foreach ($items as $item) {
-            $p = (float)$item['quantity'] * (float)$item['price'];
-            $expectedGross += $p + $p * (float)$item['vat'] / 100;
-        }
-        if (abs(round($expectedGross, 2) - $gross) > 0.001) {
-            throw new RuntimeException('VAT rounding differs from ISPConfig. Explicit rounding policy needed.');
+        // Updated callers supply the same cent-rounded totals used by the PDF and DB.
+        // Keep the legacy comparison for older callers rather than hiding a mismatch.
+        if (isset($options['expected_totals'])) {
+            foreach (['net'=>$netTotal, 'vat'=>$vatTotal, 'gross'=>$gross] as $field=>$actual) {
+                $expected = $options['expected_totals'][$field] ?? null;
+                if (!is_numeric($expected) || abs(round((float)$expected, 2) - $actual) > 0.001) {
+                    throw new RuntimeException('Invoice '.$field.' differs between PDF and XML: expected '.var_export($expected, true).', XML '.$actual.'.');
+                }
+            }
+        } else {
+            $expectedGross = 0.0;
+            foreach ($items as $item) {
+                $p = (float)$item['quantity'] * (float)$item['price'];
+                $expectedGross += $p + $p * (float)$item['vat'] / 100;
+            }
+            if (abs(round($expectedGross, 2) - $gross) > 0.001) {
+                throw new RuntimeException('Legacy rounding differs from XML. Update the ISPConfig caller to pass expected_totals from cent-rounded invoice positions.');
+            }
         }
         $doc->setDocumentSummation($gross, $gross, $netTotal, 0.0, 0.0, $netTotal, $vatTotal);
-        $pdf = ZugferdDocumentPdfBuilder::fromPdfString($doc, $existingPdf);
-        $pdf->generateDocument();
-        return $pdf->downloadString();
+        // Monetary totals stay at two decimals; unit prices retain DB precision.
+        $decimalMaps = \horstoeko\zugferd\ZugferdSettings::getSpecialDecimalPlacesMaps();
+        try {
+            \horstoeko\zugferd\ZugferdSettings::setUnitAmountDecimals(4);
+            $pdf = ZugferdDocumentPdfBuilder::fromPdfString($doc, $existingPdf);
+            $pdf->generateDocument();
+            return $pdf->downloadString();
+        } finally {
+            \horstoeko\zugferd\ZugferdSettings::setSpecialDecimalPlacesMaps($decimalMaps);
+        }
     }
 
     private static function date(string $value): DateTimeImmutable
