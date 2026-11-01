@@ -15,7 +15,7 @@ function generate($invoice, $issuer, $items, $input, $term, $options=[]) {
     $validator = new ZugferdXsdValidator($reader);
     $validator->validate();
     check(!$validator->hasValidationErrors(), 'XSD validation failed');
-    $xml = $reader->serializeAsXml();
+    $xml = ZugferdDocumentPdfReader::getXmlFromContent($pdf);
     $doc = new DOMDocument(); $doc->loadXML($xml);
     $xp = new DOMXPath($doc); $xp->registerNamespace('ram','urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100');
     return [$xml, $xp];
@@ -31,7 +31,7 @@ foreach ($cases as $unit=>$expected) {
     [$ignored,$x]=generate($invoice,$issuer,[array_merge($base,['unit'=>$unit])],$input,['description'=>'7 Tage', 'due_days'=>7]);
     check($x->evaluate('string(//ram:BilledQuantity/@unitCode)')===$expected[0], $unit.' code');
     check($x->evaluate('string(//ram:BilledQuantity)')===$expected[1], $unit.' quantity');
-    check($x->evaluate('string(//ram:NetPriceProductTradePrice/ram:ChargeAmount)')===$expected[2], $unit.' unit price');
+    check((float)$x->evaluate('string(//ram:NetPriceProductTradePrice/ram:ChargeAmount)')===(float)$expected[2], $unit.' unit price');
     check($x->evaluate('string(//ram:LineTotalAmount)')==='1100.00', 'Unchanged line net');
 }
 foreach ([['Sofort',2],['Sofort',1],['je Quartalsanfang 25%',30],['per Lastschrift',7],['2% Skonto bei 7 Tage Zahlung',7],['50% nach Beauftragung 50% nach Lieferung',14]] as $term) {
@@ -78,10 +78,32 @@ foreach (["Support\n31.10.2027-01.11.2026", "Support\n31.02.2026-31.10.2027", "S
     } catch (RuntimeException $e) { /* Do not silently use the invoice date. */ }
 }
 
+$roundingItems=[];
+foreach ([[3,109],[3,75],[12,0.83],[12,4.19],[12,1.67],[12,0.83]] as $line) {
+    $roundingItems[]=array_merge($base,['quantity'=>$line[0],'price'=>$line[1],'unit'=>'Item']);
+}
+for ($i=0;$i<7;$i++) $roundingItems[]=array_merge($base,['quantity'=>12,'price'=>0.5798,'unit'=>'Item']);
+$roundingOptions=['expected_totals'=>['net'=>690.96,'vat'=>131.28,'gross'=>822.24]];
+$decimalMapsBefore=\horstoeko\zugferd\ZugferdSettings::getSpecialDecimalPlacesMaps();
+[$roundingXml,$x]=generate($invoice,$issuer,$roundingItems,$input,['description'=>'30 Tage','due_days'=>30],$roundingOptions);
+check($x->evaluate('string(//ram:LineTotalAmount[1])')==='327.00','First line cents');
+check($x->evaluate('string((//ram:ChargeAmount)[7])')==='0.5798','Preserve unit-price precision');
+check($x->evaluate('string((//ram:LineTotalAmount)[7])')==='6.96','Round each net line');
+check(abs($x->evaluate('sum(//ram:SpecifiedTradeSettlementLineMonetarySummation/ram:LineTotalAmount)')-690.96)<0.0001,'Sum rounded line amounts');
+check($x->evaluate('string(//ram:GrandTotalAmount)')==='822.24','Gross matches PDF policy');
+check($x->evaluate('string(//ram:TaxTotalAmount)')==='131.28','VAT from rounded taxable base');
+check(\horstoeko\zugferd\ZugferdSettings::getSpecialDecimalPlacesMaps()===$decimalMapsBefore,'Restore library formatting settings');
+try {
+    generate($invoice,$issuer,$roundingItems,$input,['description'=>'30 Tage','due_days'=>30],['expected_totals'=>['net'=>690.94,'vat'=>131.28,'gross'=>822.22]]);
+    throw new LogicException('Accepted different PDF totals');
+} catch (RuntimeException $e) {
+    check(str_contains($e->getMessage(),'differs between PDF and XML'),'Preserve mismatch safety check');
+}
+
 $rcInvoice=$invoice; $rcInvoice['vat_id']='DE987654321';
 [$rcXml,$x]=generate($rcInvoice,$issuer,[array_merge($base,['vat'=>0,'invoice_vat_rate_id'=>2])],$input,['description'=>'30 Tage','due_days'=>30]);
 check($x->evaluate('string(//ram:ApplicableHeaderTradeSettlement/ram:ApplicableTradeTax/ram:CategoryCode)')==='AE', 'Reverse charge ID 2');
 check($x->evaluate('string(//ram:ApplicableHeaderTradeSettlement/ram:ApplicableTradeTax/ram:ExemptionReasonCode)')==='VATEX-EU-AE', 'Reverse charge reason');
 $output=getenv('VALIDATION_OUTPUT_DIR');
-if ($output) { file_put_contents($output.'/corrected.xml',$xml); file_put_contents($output.'/reverse-charge.xml',$rcXml); file_put_contents($output.'/fallback.xml',$fallbackXml); file_put_contents($output.'/recurring.xml',$recurringXml); }
+if ($output) { file_put_contents($output.'/corrected.xml',$xml); file_put_contents($output.'/reverse-charge.xml',$rcXml); file_put_contents($output.'/fallback.xml',$fallbackXml); file_put_contents($output.'/recurring.xml',$recurringXml); file_put_contents($output.'/rounding.xml',$roundingXml); }
 echo "PASS: payment terms, service periods, unit conversions, reverse charge, XSD and failure cases\n";

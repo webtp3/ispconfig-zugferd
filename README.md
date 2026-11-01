@@ -83,3 +83,22 @@ BG-26 start 2026-11-01 and end 2027-10-31. LF/CRLF, spaces around the separator,
 and en/em dashes are supported. The explicit period takes precedence over the
 invoice-date fallback. Distinct multiple ranges, invalid dates, reversed ranges,
 and date-containing prose without a recognized range stop for review.
+
+### Cent-rounded invoice positions and precise unit prices
+
+The ISPConfig rounding update uses this policy consistently in PDF, XML and the
+stored invoice amount: round each quantity × net unit price to cents; sum those
+rounded net lines per VAT rate; round VAT per group to cents; sum net and VAT.
+Unit prices retain four decimals in XML while totals remain at two decimals.
+Library formatting settings are restored after PDF generation.
+
+The caller passes `expected_totals` (`net`, `vat`, `gross`) in the seventh options
+argument, computed by the PDF's `invoice_display_totals()` helper. Mismatches
+still stop finalization. Older callers retain the legacy comparison and can
+still fail; update both repositories together, not just this service. Do not
+use a stale draft `invoice_amount` as the expected amount.
+
+Regression R2026110544: six net lines 327/225/9.96/50.28/20.04/9.96 plus seven
+12 × 0.5798 lines yield rounded net 690.96, VAT 131.28 and gross 822.24.
+The legacy unrounded calculation yielded gross 822.22. Already issued invoices
+must not be silently overwritten as part of deploying this rounding policy.
