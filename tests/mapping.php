@@ -62,10 +62,26 @@ check($x->evaluate('string(//ram:BillingSpecifiedPeriod/ram:StartDateTime/*)')==
 check($x->evaluate('string(//ram:BillingSpecifiedPeriod/ram:EndDateTime/*)')==='20261231', 'Explicit line period wins over fallback');
 check($x->evaluate('count(//ram:ActualDeliverySupplyChainEvent)')==0, 'Do not override period with header delivery date');
 
+// Cron expands {ITEMNAME} followed by a standalone {FROMDATE}-{TODATE} line.
+foreach (["\n", "\r\n"] as $newline) {
+    foreach (['-', ' - ', '–'] as $separator) {
+        $description = 'Annual support'.$newline.'01.11.2026'.$separator.'31.10.2027';
+        [$recurringXml, $x] = generate($invoice, $issuer, [array_merge($base, ['description'=>$description])], $input, ['description'=>'30 Tage','due_days'=>30], ['use_invoice_date_as_delivery_date'=>true]);
+        check($x->evaluate('string(//ram:BillingSpecifiedPeriod/ram:StartDateTime/*)')==='20261101', 'Recurring period start');
+        check($x->evaluate('string(//ram:BillingSpecifiedPeriod/ram:EndDateTime/*)')==='20271031', 'Recurring period end');
+    }
+}
+foreach (["Support\n31.10.2027-01.11.2026", "Support\n31.02.2026-31.10.2027", "Support\n01.11.2026-31.10.2027\n01.11.2027-31.10.2028", "Support\nOffer dated 01.11.2026 for delivery 31.10.2027"] as $description) {
+    try {
+        generate($invoice, $issuer, [array_merge($base, ['description'=>$description])], $input, ['description'=>'30 Tage','due_days'=>30], ['use_invoice_date_as_delivery_date'=>true]);
+        throw new LogicException('Accepted invalid/ambiguous date text');
+    } catch (RuntimeException $e) { /* Do not silently use the invoice date. */ }
+}
+
 $rcInvoice=$invoice; $rcInvoice['vat_id']='DE987654321';
 [$rcXml,$x]=generate($rcInvoice,$issuer,[array_merge($base,['vat'=>0,'invoice_vat_rate_id'=>2])],$input,['description'=>'30 Tage','due_days'=>30]);
 check($x->evaluate('string(//ram:ApplicableHeaderTradeSettlement/ram:ApplicableTradeTax/ram:CategoryCode)')==='AE', 'Reverse charge ID 2');
 check($x->evaluate('string(//ram:ApplicableHeaderTradeSettlement/ram:ApplicableTradeTax/ram:ExemptionReasonCode)')==='VATEX-EU-AE', 'Reverse charge reason');
 $output=getenv('VALIDATION_OUTPUT_DIR');
-if ($output) { file_put_contents($output.'/corrected.xml',$xml); file_put_contents($output.'/reverse-charge.xml',$rcXml); file_put_contents($output.'/fallback.xml',$fallbackXml); }
+if ($output) { file_put_contents($output.'/corrected.xml',$xml); file_put_contents($output.'/reverse-charge.xml',$rcXml); file_put_contents($output.'/fallback.xml',$fallbackXml); file_put_contents($output.'/recurring.xml',$recurringXml); }
 echo "PASS: payment terms, service periods, unit conversions, reverse charge, XSD and failure cases\n";

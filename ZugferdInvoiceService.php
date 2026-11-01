@@ -216,16 +216,24 @@ final class ZugferdInvoiceService
     {
         $start = $item['service_period_start'] ?? null;
         $end = $item['service_period_end'] ?? null;
-        // Legacy ISPConfig stores expanded FROMDATE/TODATE at the end of the first line.
-        // Read only that precise form, never dates from arbitrary free-text lines.
+        // Support the legacy first-line suffix and the recurring template's
+        // standalone FROMDATE-TODATE line. Never select arbitrary dates in prose.
         if (!$start && !$end) {
-            $firstLine = preg_split('/\R/u', $description)[0];
-            if (preg_match('/(?:^|\s)(\d{2}\.\d{2}\.\d{4})\s+(?:[-–]\s*)?(\d{2}\.\d{2}\.\d{4})\s*$/u', $firstLine, $match)) {
-                $start = implode('-', array_reverse(explode('.', $match[1])));
-                $end = implode('-', array_reverse(explode('.', $match[2])));
-            } else {
-                return null;
+            $lines = preg_split('/\R/u', $description);
+            $datePattern = '(\d{2}\.\d{2}\.\d{4})';
+            $separator = '(?:\s*[-–—]\s*|\s+)';
+            $periods = [];
+            foreach ($lines as $index => $line) {
+                $prefix = $index === 0 ? '(?:^|\s)' : '^\s*';
+                if (preg_match('/'.$prefix.$datePattern.$separator.$datePattern.'\s*$/u', $line, $match)) {
+                    $from = implode('-', array_reverse(explode('.', $match[1])));
+                    $to = implode('-', array_reverse(explode('.', $match[2])));
+                    $periods[$from.':'.$to] = [$from, $to];
+                }
             }
+            if (!$periods) return null;
+            if (count($periods) !== 1) throw new RuntimeException('Ambiguous service periods in invoice line.');
+            [$start, $end] = reset($periods);
         }
         if (!$start || !$end) throw new RuntimeException('Incomplete service period.');
         $from = self::date((string)$start);

@@ -68,3 +68,18 @@ To check business rules with the bundled Factur-X XSLT, install `saxonche` and
 /path/to/invoice.xml`. It also checks BR-CO-25 explicitly because that rule is
 not present in the bundled stylesheet. The test invoice XML can be exported with
 `VALIDATION_OUTPUT_DIR=/path php tests/mapping.php`. This is not PDF/A validation.
+
+### Recurring template date ranges
+
+The service also accepts the standard two-line recurring description:
+
+```text
+{ITEMNAME}
+{FROMDATE}-{TODATE}
+```
+
+For example `Annual support` followed by `01.11.2026-31.10.2027` maps to
+BG-26 start 2026-11-01 and end 2027-10-31. LF/CRLF, spaces around the separator,
+and en/em dashes are supported. The explicit period takes precedence over the
+invoice-date fallback. Distinct multiple ranges, invalid dates, reversed ranges,
+and date-containing prose without a recognized range stop for review.
